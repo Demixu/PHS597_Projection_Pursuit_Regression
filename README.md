@@ -1,0 +1,2 @@
+# PHS597_Projection_Pursuit_Regression
+Implementation of ppt
