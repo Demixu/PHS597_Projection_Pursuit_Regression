@@ -1,0 +1,214 @@
+---
+title: "Projection_Pursuit_Regression"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+```
+
+## Prepare data
+
+```{r cars}
+## load package
+library(splines)
+library(MASS)
+
+## simulate X mat
+x1 = rnorm(50,mean=2,sd=4)
+x2 = rnorm(50,mean=3,sd=1)
+x = data.frame(x1,x2)
+x = as.matrix(x)
+## simulate non-linear relationship
+y = exp(-x1)/3+x2^2
+
+```
+
+## natural cubic spline (smoothing spline share the same basis)
+
+```{r}
+## shared function
+h_func = function(x,knot){
+  out=max(x,knot)-knot
+  return(out)
+}
+
+ols_estimate_beta = function(X,Y){
+  return(ginv(t(X)%*%X)%*%t(X)%*%Y)
+}
+
+natural_cubic_func = function(x,knots_index){
+  knots_index = sort(knots_index)
+  N = length(x)
+  K = length(knots_index)#4+K intotal
+  basis = matrix(0,nrow=N,ncol=K)
+  for (i in 1:2){
+    basis[,i]=x^(i-1)
+  }
+  knots_a = knots_index[K]
+  knots_b = knots_index[K-1]
+ for (j in 3:K-2){
+   A =(sapply(x, h_func,knot=knots_index[j])^3-sapply(x,h_func,knot=knots_a)^3)/(knots_index[j]-knots_a)
+  B =  (sapply(x, h_func,knot=knots_b)^3-sapply(x,h_func,knot=knots_a)^3)/(knots_b-knots_a)
+  basis[,j]=A-B
+ }
+   return(basis)
+}
+```
+
+## smoothing spline
+
+
+```{r}
+omega_matrix_func = function(x_mat){
+  knots_index = sort(x_mat)
+  basis = natural_cubic_func(x_mat,knots_index)
+  N = length(x_mat)
+  K = length(x_mat)
+  #N*N matrix
+  omega =matrix(0,nrow=N,ncol=N)
+  omega_0 = matrix(0,nrow=N-2,ncol=N-2)
+  knots_a = knots_index[K]
+  knots_b = knots_index[K-1]
+  C =knots_b-knots_a
+  for(i in 1:(N-2)){
+    for (j in i:(N-2)){
+      ##get the integration from larger knot to K-1
+      integrate_1 = function(x){
+        36*(x-knots_index[i])*(x-knots_index[j])/(knots_index[j]-knots_a)*(knots_index[i]-knots_a)
+      }
+      ##get the integration from K-1knot to K not
+      integrate_2 = function(x){
+        (6*(x-knots_index[i])/(knots_index[i]-knots_a)-6*(x-knots_b)/C)*(6*(x-knots_index[j])/(knots_index[j]-knots_a)-6*(x-knots_b)/C)
+      }
+      kk = integrate(integrate_1,lower = knots_index[j], upper=knots_a)$value+integrate(integrate_2,lower=knots_b,upper=knots_a)$value
+      omega_0[i,j]=kk
+    }
+  }
+  omega_0 = omega_0+t(omega_0)-diag(omega_0) ##construct symmetric matrix
+  omega[3:N,3:N]=omega_0
+  return(omega)
+}
+```
+
+
+
+## Manually write ppr procedure using both manual one and existing smooth.spline function
+
+** construct smooth spline function
+** Iteratively update weights and refit the smooth spline until converge
+
+```{r}
+## load function
+library(splines)
+
+ppr_manual1 = function(y, # the outcome value
+                      x, # predictor matrix
+                      nknot, # number of knots used in smoothing spline
+                      initial_beta, # starting weights in ppr, normally we can set a 1 vector to start
+                      epsilon,#set to 0 when we don't want to use this criterion for convergence in model fitting
+                      iteration)#set to a large number when we don't care about the iteration time/computational burden)
+                      {
+
+if(length(as.vector(initial_beta))!=ncol(as.matrix(x))){
+  print("wrong with dimension of weights")
+}
+ N =nrow(x)
+ dif = 11
+ beta_new = initial_beta
+ i=0
+ while (i<iteration&&dif>epsilon) {
+   ##get initial fit
+   ###get initial univariate x
+   v = x%*%beta_new
+   ### fit smoothing spline
+   smooth_spline_basis = natural_cubic_func(v,sort(v))
+   ss = smooth_spline_basis
+   lambda = 58
+   beta_ss = ginv(t(ss)%*%ss+lambda*omega_matrix_func(v))%*%t(ss)%*%y
+   fited_ss = smooth_spline_basis%*%beta_ss
+   y_hat = fited_ss
+   ##calculate 1st derivative at w_old*x
+   d1_mat<-matrix(nrow=N,ncol=N-2)
+   ## i for original v and j for sorted v --> use rank to fetch the kth one
+   for(i in 1:N){
+   for(j in 1:(N-2)){
+    if(j<=rank(v)[i]){
+    d1_mat[i,j]<-3*(v[i]-sort(v)[j])^2/(sort(v)[j]-sort(v)[N])
+    }else{
+    d1_mat[i,j]<-0
+    }
+  }
+   }
+   d1<-matrix(beta_ss[2],nrow=N,ncol=1)+d1_mat%*%beta_ss[3:N,1]
+   weight_mat = diag(as.vector(d1)/sum(d1^2))
+   b = v + (y-y_hat)/d1
+   beta_old=beta_new ##store the old one
+   beta_new = solve(t(x)%*%weight_mat%*%x)%*%t(x)%*%weight_mat%*%b ## update weight by minimizing the loss function -- in the form of weighted least square problem
+   dif = crossprod(beta_old-beta_new)
+   i=i+1
+ }
+ A = list(fited=fited_ss,weight=beta_new)
+  return(A)
+}
+
+```
+
+
+```{r}
+### try another way of updating weight
+
+ppr_manual2 = function(y, # the outcome value
+                      x, # predictor matrix
+                      nknot, # number of knots used in smoothing spline
+                      initial_beta, # starting weights in ppr, normally we can set a 1 vector to start
+                      epsilon,#set to 0 when we don't want to use this criterion for convergence in model fitting
+                      iteration)#set to a large number when we don't care about the iteration time/computational burden)
+                      {
+if(length(initial_beta)!=ncol(x)){
+  print("wrong with dimension of weights")
+}
+ dif = 11
+ beta_new = initial_beta
+ i=0
+ while (i<iteration&&dif>epsilon) {
+   ##get initial fit
+   ###get initial univariate x
+   v = x%*%beta_new
+   if(nknot=="FALSE"){
+   spline.fit = smooth.spline(v,y)}else{
+   spline.fit=smooth.spline(v,y,nknots=nknot)
+   }
+   ##calculate derivative at w_old*x
+   y_hat = predict(spline.fit,v,deriv = 0)$y
+   d1 = predict(spline.fit,v,deriv = 1)$y
+   weight_mat = diag(as.vector(d1)/sum(d1^2))
+   b = v + (y-y_hat)/d1
+   beta_old=beta_new ##store the old one
+   beta_new = solve(t(x)%*%weight_mat%*%x)%*%t(x)%*%weight_mat%*%b ## update weight by minimizing the loss function -- in the form of weighted least square problem
+   dif = crossprod(beta_old-beta_new)
+   i=i+1
+   }
+  return(list(fitted=spline.fit$y,weight=beta_new))
+ }
+```
+
+
+## compare fitted one
+
+For ppr_manual1, a convergence issue still exists. 
+And for ppr_manual2, the weight calculated is different from that in ppr function
+
+```{r}
+
+#ppr_manual1(y,x,nknot=FALSE,initial_beta = c(1/2,1/2),1e-3,1000)
+ppr_manual2(y,x,nknot=FALSE,initial_beta = c(1/2,1/2),1e-3,1000)$weight
+ppr(x,y,nterms = 1)$alpha
+```
+
+
+
+
+
+
+
